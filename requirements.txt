@@ -1,0 +1,6 @@
+torch>=2.7
+transformers>=4.51
+datasets
+accelerate
+vllm  # only for distillation data generation
+pytest
