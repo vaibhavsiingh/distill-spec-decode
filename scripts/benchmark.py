@@ -59,6 +59,7 @@ def main():
     ap.add_argument("--gamma", type=int, default=5)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--out", default="results/benchmark.json")
+    ap.add_argument("--compile_backend", default="inductor", choices=["inductor", "cudagraphs"])
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -88,7 +89,8 @@ def main():
     def kv(name, kind):
         if (name, kind) not in kvs:
             model = target if name == "target" else drafts[name]
-            kvs[name, kind] = make_kv(model, {"nocache": "none"}.get(kind, kind))
+            extra = {"backend": args.compile_backend} if kind == "static" else {}
+            kvs[name, kind] = make_kv(model, {"nocache": "none"}.get(kind, kind), **extra)
             if kind == "static":
                 # compile every graph shape up front so no compilation lands in timed runs
                 kvs[name, kind].warmup(range(1, args.gamma + 2))

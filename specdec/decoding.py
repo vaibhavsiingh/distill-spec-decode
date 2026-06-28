@@ -79,16 +79,19 @@ class StaticKV(NoCacheKV):
     max_graph_len tokens) run through a compiled forward, one graph per q.
     """
 
-    def __init__(self, model, max_len=4096, max_graph_len=16, compile=True):
+    def __init__(self, model, max_len=4096, max_graph_len=16, compile=True, backend="inductor"):
         super().__init__(model)
         self.max_graph_len = max_graph_len
         self.cache = StaticCache(config=model.config, max_cache_len=max_len)
         self.slots = torch.arange(max_len, device=model.device)
+        self.neg_inf = torch.tensor(torch.finfo(model.dtype).min, dtype=model.dtype, device=model.device)
         self.step = model.forward
         if compile:
             # draft and target share Qwen2ForCausalLM.forward, so their graphs count toward one limit
             torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
-            self.step = torch.compile(model.forward, mode="reduce-overhead", fullgraph=True, dynamic=False)
+            # "cudagraphs" skips inductor codegen: much faster to compile, slightly slower kernels
+            kw = dict(mode="reduce-overhead") if backend == "inductor" else {}
+            self.step = torch.compile(model.forward, backend=backend, fullgraph=True, dynamic=False, **kw)
 
     def reset(self):
         self.cache.reset()
@@ -106,12 +109,16 @@ class StaticKV(NoCacheKV):
 
     def forward(self, seq, extra=None):
         x = seq[:, self.n:] if extra is None else torch.cat([seq[:, self.n:], extra], dim=1)
+        # fresh buffer: a slice of `seq` has stride (len(seq), 1), which changes every step
+        # and would make dynamo recompile the graph on each call
+        x = x[0].clone()[None]
         q = x.shape[1]
         pos = torch.arange(self.n, self.n + q, device=x.device)
         # explicit 4D mask over the whole static cache: slot j visible to query i iff j <= n + i.
         # This is what hides stale slots after a rollback, and it bypasses HF's
         # data-dependent mask construction, which breaks the CUDA graph.
-        mask = (self.slots[None, :] <= pos[:, None])[None, None]
+        # additive float mask: works for both eager and sdpa attention
+        mask = torch.where(self.slots[None, :] <= pos[:, None], 0.0, self.neg_inf)[None, None]
         fn = self.step if q <= self.max_graph_len else self.model.forward
         out = fn(input_ids=x, attention_mask=mask, position_ids=pos[None], cache_position=pos,
                  past_key_values=self.cache, use_cache=True)
@@ -119,7 +126,12 @@ class StaticKV(NoCacheKV):
         return out.logits[0].clone()  # graph output buffers are reused on the next replay
 
     def rollback(self, n):
-        self.n = min(self.n, n)
+        if self.n > n:
+            self.n = n
+            # StaticLayer writes at its own on-device counter, not at cache_position;
+            # rewind it in place (keeps the static address the CUDA graphs captured)
+            for layer in self.cache.layers:
+                layer.cumulative_length.fill_(n)
 
 
 def make_kv(model, kind, **kw):
