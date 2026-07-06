@@ -77,6 +77,7 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.5, help="CE weight; 1.0 disables KD")
     ap.add_argument("--kd_temp", type=float, default=1.0)
     ap.add_argument("--log_every", type=int, default=20)
+    ap.add_argument("--grad_ckpt", action="store_true", help="only needed for much larger drafts")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -101,7 +102,8 @@ def main():
 
     draft = AutoModelForCausalLM.from_pretrained(args.draft, dtype=torch.bfloat16,
                                                  attn_implementation="sdpa").to(device)
-    draft.gradient_checkpointing_enable()
+    if args.grad_ckpt:
+        draft.gradient_checkpointing_enable()
     draft.config.use_cache = False
     use_kd = args.alpha < 1.0
     if use_kd:
