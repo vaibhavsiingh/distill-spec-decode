@@ -78,3 +78,17 @@ def test_static_cache_matches_dynamic(models):
     b, _ = speculative_generate(tk, dk, ids, 64, gamma=4, eos_token_id=eos)
     c, _ = autoregressive_generate(tk, ids, 64, eos_token_id=eos)
     assert a.tolist() == b.tolist() == c.tolist()
+
+
+@pytest.mark.parametrize("kind", ["none", "dynamic", "static"])
+def test_backend_reuse_across_prompts(models, kind):
+    # benchmark reuses one backend per model across prompts; reset() must fully clear state
+    tok, t, d, eos = models
+    kw = {"max_len": 1024, "compile": False} if kind == "static" else {}
+    tk, dk = make_kv(t, kind, **kw), make_kv(d, kind, **kw)
+    for p in PROMPTS[:2]:
+        ids = _ids(tok, p)
+        ref, _ = autoregressive_generate(t, ids, 32, eos_token_id=eos)
+        autoregressive_generate(tk, ids, 32, eos_token_id=eos)
+        out, _ = speculative_generate(tk, dk, ids, 32, gamma=4, eos_token_id=eos)
+        assert out.tolist() == ref.tolist()

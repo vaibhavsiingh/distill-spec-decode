@@ -43,7 +43,7 @@ class NoCacheKV:
         self.model, self.n = model, 0
 
     def reset(self):
-        pass
+        self.n = 0
 
     def forward(self, seq, extra=None):
         """Logits for positions n..end of seq (+extra tokens); caches them."""
